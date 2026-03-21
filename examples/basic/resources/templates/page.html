@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ring-hot-reload example</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <h1>Todo</h1>
+  <form hx-post="/todos" hx-target="#todo-list" hx-swap="innerHTML" hx-on::after-request="this.reset()">
+    <input type="text" name="title" placeholder="What needs to be done?" required>
+    <button type="submit">Add</button>
+  </form>
+  <ul id="todo-list">
+    {{todos}}
+  </ul>
+</body>
+</html>
