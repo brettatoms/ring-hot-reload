@@ -1,5 +1,7 @@
 # ring-hot-reload
 
+[![Clojars Project](https://img.shields.io/clojars/v/com.github.brettatoms/ring-hot-reload.svg)](https://clojars.org/com.github.brettatoms/ring-hot-reload)
+
 A Ring middleware that provides hot reload for server-rendered Clojure applications.
 When server-side code changes (file save or REPL eval), the browser automatically
 re-fetches the page and morphs the DOM in place using [idiomorph](https://github.com/bigskysoftware/idiomorph),
