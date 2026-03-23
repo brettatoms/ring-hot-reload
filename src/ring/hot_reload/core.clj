@@ -61,9 +61,120 @@
     (on-close [_ socket _ _]
       (swap! clients-atom disj socket))))
 
-(defn- ws-handler [clients-atom]
-  (fn [_request]
-    {::ws/listener (ws-listener clients-atom)}))
+;; ---------------------------------------------------------------------------
+;; hot-reloader
+;; ---------------------------------------------------------------------------
+
+(defn hot-reloader
+  "Creates a hot reloader — an immutable map of composable pieces for hot
+   reload. Does not start watching; call `start!` to begin.
+
+   Returns a map with:
+
+     :ws-handler           - Ring handler for the WebSocket endpoint. Mount
+                             at a route (e.g. \"/__hot-reload\") or let
+                             `wrap-hot-reload` handle routing automatically.
+                             Handles both sync and async Ring.
+
+     :injection-middleware - Ring middleware (fn [handler] -> handler) that
+                             injects the client script into full HTML page
+                             responses. Partial responses (htmx fragments,
+                             etc.) are left untouched.
+
+     :script               - JavaScript string containing the client code
+                             (idiomorph, WebSocket reconnection, error overlay).
+
+     :uri-prefix           - The WebSocket endpoint path.
+
+   Lifecycle functions (call these yourself):
+
+     (start! reloader)        — starts watching; returns a handle
+     (stop! reloader handle)  — stops watching, cleans up resources
+
+   Options:
+     :watch-paths      - directories to watch (default [\"src\"])
+     :watch-extensions - file extensions that trigger reload
+                         (default #{\"clj\" \".cljc\" \".edn\" \".html\" \".css\"})
+     :uri-prefix       - WebSocket endpoint path (default \"/__hot-reload\")
+     :inject?          - predicate (fn [request response]) controlling script
+                         injection (default: always inject into HTML responses)
+     :debounce-ms      - debounce window in ms (default 100)
+     :bust-css-cache?  - append cache-busting param to stylesheet URLs on
+                         reload (default false)"
+  [& [{:keys [watch-paths
+              watch-extensions
+              uri-prefix
+              inject?
+              debounce-ms
+              bust-css-cache?]
+       :or {watch-paths      ["src"]
+            watch-extensions #{".clj" ".cljc" ".edn" ".html" ".css"}
+            uri-prefix       "/__hot-reload"
+            inject?          (constantly true)
+            debounce-ms      100
+            bust-css-cache?  false}}]]
+  (let [clients     (make-ws-state)
+        ws-handle   (fn [_request]
+                      {::ws/listener (ws-listener clients)})
+        script      (client/standalone-script uri-prefix {:bust-css-cache? bust-css-cache?})
+        w           (watcher/beholder-watcher watch-paths watch-extensions)
+        {:keys [invoke shutdown]}
+        (watcher/debounce (fn [_changed-paths]
+                            (log/debug "File change detected, triggering reload")
+                            (notify-ws-clients! clients))
+                          debounce-ms)
+        notify-fn   #(invoke nil)]
+    ;; Register for nREPL notifications
+    (register-notify-fn! notify-fn)
+    {:ws-handler
+     (fn
+       ([request]
+        (if (ws/upgrade-request? request)
+          (ws-handle request)
+          {:status 400 :body "WebSocket upgrade required"}))
+       ([request respond _raise]
+        (if (ws/upgrade-request? request)
+          (respond (ws-handle request))
+          (respond {:status 400 :body "WebSocket upgrade required"}))))
+
+     :injection-middleware
+     (fn [handler]
+       (fn
+         ([request]
+          (let [response (handler request)]
+            (if (inject? request response)
+              (inject/inject-into-response response script)
+              response)))
+         ([request respond raise]
+          (handler request
+                   (fn [response]
+                     (respond (if (inject? request response)
+                                (inject/inject-into-response response script)
+                                response)))
+                   raise))))
+
+     :script     script
+     :uri-prefix uri-prefix
+
+     ;; Private — used by start!/stop!
+     ::watcher   w
+     ::invoke    invoke
+     ::shutdown  shutdown
+     ::notify-fn notify-fn}))
+
+(defn start!
+  "Starts the file watcher for a hot reloader. Returns a handle to pass
+   to `stop!`."
+  [reloader]
+  (watcher/start! (::watcher reloader) (::invoke reloader)))
+
+(defn stop!
+  "Stops the file watcher for a hot reloader. `handle` is the value
+   returned by `start!`."
+  [reloader handle]
+  (watcher/stop! (::watcher reloader) handle)
+  ((::shutdown reloader))
+  (deregister-notify-fn! (::notify-fn reloader)))
 
 ;; ---------------------------------------------------------------------------
 ;; wrap-hot-reload
@@ -72,79 +183,33 @@
 (defn wrap-hot-reload
   "Ring middleware that provides hot reload for server-rendered HTML responses.
 
-   Watches file system paths for changes and notifies connected browsers via
-   WebSocket. The browser re-fetches the page and morphs the DOM in place.
+   Takes a Ring handler and a hot reloader (from `hot-reloader`), returns a
+   new Ring handler that:
+   1. Intercepts requests to the WebSocket endpoint
+   2. Injects the client script into full HTML page responses
+   3. Passes all other requests through unchanged
 
-   Options:
-     :watch-paths      - directories to watch (default [\"src\"])
-     :watch-extensions - file extensions to trigger reload
-                         (default #{\"clj\" \".cljc\" \".edn\" \".html\" \".css\"})
-     :uri-prefix       - WebSocket endpoint path (default \"/__hot-reload\")
-     :inject?          - predicate (fn [request response]) controlling injection
-                         (default: always inject into HTML responses)
-     :debounce-ms      - debounce window in ms (default 100)
-     :bust-css-cache?  - append cache-busting param to stylesheet URLs on
-                         reload (default false). Useful when serving plain CSS
-                         without Vite or hashed filenames.
+   This is a standard Ring middleware — it takes a handler and returns a handler.
 
-   Lifecycle: The caller is responsible for starting/stopping the watcher.
-   This middleware returns a map with:
-     :handler      - the Ring handler to use
-     :watcher      - the Watcher instance
-     :start!       - fn [] that starts watching; returns a handle
-     :stop!        - fn [handle] that stops watching
-     :notify!      - fn [] that manually triggers a reload"
-  [handler & [{:keys [watch-paths
-                      watch-extensions
-                      uri-prefix
-                      inject?
-                      debounce-ms
-                      bust-css-cache?]
-               :or {watch-paths      ["src"]
-                    watch-extensions #{".clj" ".cljc" ".edn" ".html" ".css"}
-                    uri-prefix       "/__hot-reload"
-                    inject?          (constantly true)
-                    debounce-ms      100
-                    bust-css-cache?  false}}]]
-  (let [clients     (make-ws-state)
-        ws-handle   (ws-handler clients)
-        script      (client/standalone-script uri-prefix {:bust-css-cache? bust-css-cache?})
-        w           (watcher/beholder-watcher watch-paths watch-extensions)
-        {:keys [invoke shutdown]}
-        (watcher/debounce (fn [_changed-paths]
-                            (log/debug "File change detected, triggering reload")
-                            (notify-ws-clients! clients))
-                          debounce-ms)
-        notify-fn   #(invoke nil)
-        ring-handler
-        (fn
-          ([request]
-           (if (= (:uri request) uri-prefix)
-             (if (ws/upgrade-request? request)
-               (ws-handle request)
-               {:status 400 :body "WebSocket upgrade required"})
-             (let [response (handler request)]
-               (if (inject? request response)
-                 (inject/inject-into-response response script)
-                 response))))
-          ([request respond raise]
-           (if (= (:uri request) uri-prefix)
-             (if (ws/upgrade-request? request)
-               (respond (ws-handle request))
-               (respond {:status 400 :body "WebSocket upgrade required"}))
-             (handler request
-                      (fn [response]
-                        (respond (if (inject? request response)
-                                   (inject/inject-into-response response script)
-                                   response)))
-                      raise))))]
-    ;; Register for nREPL notifications
-    (register-notify-fn! notify-fn)
-    {:handler  ring-handler
-     :watcher  w
-     :start!   (fn [] (watcher/start! w invoke))
-     :stop!    (fn [handle]
-                 (watcher/stop! w handle)
-                 (shutdown)
-                 (deregister-notify-fn! notify-fn))
-     :notify!  notify-fn}))
+   Example:
+     (let [hr  (hot/hot-reloader {:watch-paths [\"src\"]})
+           app (hot/wrap-hot-reload my-handler hr)
+           h   (hot/start! hr)]
+       ;; app is your Ring handler
+       ;; later: (hot/stop! hr h))
+
+   For more control (e.g. mounting the WebSocket endpoint as a router route
+   and adding injection as separate middleware), use the reloader map keys
+   directly: `:ws-handler`, `:injection-middleware`, `:script`."
+  [handler reloader]
+  (let [{:keys [ws-handler injection-middleware uri-prefix]} reloader
+        inject-handler (injection-middleware handler)]
+    (fn
+      ([request]
+       (if (= (:uri request) uri-prefix)
+         (ws-handler request)
+         (inject-handler request)))
+      ([request respond raise]
+       (if (= (:uri request) uri-prefix)
+         (ws-handler request respond raise)
+         (inject-handler request respond raise))))))

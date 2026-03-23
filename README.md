@@ -38,15 +38,17 @@ Add to your `deps.edn`:
    :headers {"Content-Type" "text/html"}
    :body "<html><body><h1>Hello</h1></body></html>"})
 
-;; Create the hot reload middleware
-(let [{:keys [handler start! stop!]} (hot/wrap-hot-reload my-handler)]
-  ;; `handler` is your new Ring handler — use it with your server adapter
-  ;; Start watching for file changes
-  (def watcher-handle (start!))
+;; 1. Create a reloader
+(def hr (hot/hot-reloader {:watch-paths ["src"]}))
 
-  ;; ... later, to stop:
-  ;; (stop! watcher-handle)
-  )
+;; 2. Wrap your handler with the middleware
+(def app (hot/wrap-hot-reload my-handler hr))
+
+;; 3. Start watching for file changes
+(def watcher-handle (hot/start! hr))
+
+;; ... later, to stop:
+;; (hot/stop! hr watcher-handle)
 ```
 
 The middleware:
@@ -102,17 +104,42 @@ to return HTML):
               (not (str/starts-with? (:uri request) "/api/")))})
 ```
 
-## Return Value
+## API
 
-`wrap-hot-reload` returns a map:
+### `hot-reloader`
+
+Creates a reloader — a map of composable pieces. Does not start watching.
+
+```clojure
+(def hr (hot/hot-reloader opts))
+```
+
+The reloader map contains:
 
 | Key | Description |
 |---|---|
-| `:handler` | The Ring handler to pass to your server adapter |
-| `:watcher` | The `Watcher` instance (for advanced use) |
-| `:start!` | `(fn [])` — starts watching; returns a handle |
-| `:stop!` | `(fn [handle])` — stops watching, cleans up resources |
-| `:notify!` | `(fn [])` — manually trigger a reload |
+| `:ws-handler` | Ring handler for the WebSocket endpoint |
+| `:injection-middleware` | Ring middleware `(fn [handler] -> handler)` that injects the client script |
+| `:script` | JavaScript string containing the client code |
+| `:uri-prefix` | The WebSocket endpoint path |
+
+### `wrap-hot-reload`
+
+Standard Ring middleware. Takes a handler and a reloader, returns a handler.
+
+```clojure
+(def app (hot/wrap-hot-reload my-handler hr))
+```
+
+### `start!` / `stop!`
+
+Start and stop the file watcher.
+
+```clojure
+(def handle (hot/start! hr))
+;; ... later:
+(hot/stop! hr handle)
+```
 
 ### Lifecycle Management
 
@@ -124,24 +151,20 @@ pattern with a Ring adapter:
          '[ring.hot-reload.core :as hot])
 
 (defonce server (atom nil))
+(defonce hr (hot/hot-reloader {:watch-paths ["src"]}))
 (defonce watcher-handle (atom nil))
 
 (defn start! []
-  (let [{:keys [handler start! stop!]} (hot/wrap-hot-reload #'my-handler)]
-    (reset! server (jetty/run-jetty handler {:port 3000 :join? false}))
-    (reset! watcher-handle (start!))))
+  (let [app (hot/wrap-hot-reload #'my-handler hr)]
+    (reset! server (jetty/run-jetty app {:port 3000 :join? false}))
+    (reset! watcher-handle (hot/start! hr))))
 
 (defn stop! []
   (when-let [h @watcher-handle]
-    ;; stop! from the wrap-hot-reload return map
-    ;; you'll need to capture it; see note below
-    )
+    (hot/stop! hr h))
   (when-let [s @server]
     (.stop s)))
 ```
-
-> **Tip:** Capture the `stop!` function from the return map alongside the watcher
-> handle so you can call it during shutdown.
 
 ## nREPL Integration
 
@@ -155,16 +178,16 @@ There are several ways to set it up:
 ### Via .nrepl.edn
 
 ```clojure
-{:middleware [ring.hot-reload.nrepl/wrap-hot-reload-nrepl]}
+{:middleware ^:concat [ring.hot-reload.nrepl/wrap-hot-reload-nrepl]}
 ```
 
 ### Via deps.edn alias
 
 ```clojure
-{:aliases
- {:dev {:extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}
-        :main-opts ["-m" "nrepl.cmdline"
-                    "--middleware" "[ring.hot-reload.nrepl/wrap-hot-reload-nrepl]"]}}}
+{:aliases {:dev {:extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}
+                 :main-opts ["-m" "nrepl.cmdline"
+                             ;; WARNING: This will replace any existing middleware
+                             "--middleware" "[ring.hot-reload.nrepl/wrap-hot-reload-nrepl]"]}}}
 ```
 
 ### Via CIDER (Emacs)
@@ -225,6 +248,34 @@ Save file → watcher detects change → debounce (100ms) → notify browser
 4. If the response is an error, displays a dismissable overlay with the error rendered in an iframe
 5. On next successful reload, the error overlay is automatically dismissed
 6. Auto-reconnects on disconnect with exponential backoff
+
+## Composable Usage (Reitit, etc.)
+
+For applications using a router, you can use the reloader's pieces directly
+instead of `wrap-hot-reload`:
+
+```clojure
+(require '[ring.hot-reload.core :as hot]
+         '[reitit.ring :as ring])
+
+(def hr (hot/hot-reloader {:watch-paths ["src" "resources/templates"]
+                            :uri-prefix "/__hot-reload"}))
+
+(def app
+  (ring/ring-handler
+   (ring/router
+    [[(:uri-prefix hr) {:get (:ws-handler hr)
+                        :no-doc true}]
+     ["" {:middleware [(:injection-middleware hr)]}
+      ["/" {:get home-handler}]
+      ["/about" {:get about-handler}]]])))
+
+(def watcher-handle (hot/start! hr))
+;; ... (hot/stop! hr watcher-handle) to shut down
+```
+
+This approach avoids wrapping the entire handler, so the WebSocket endpoint
+participates in your router's middleware stack naturally.
 
 ## Vite Integration
 
