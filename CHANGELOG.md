@@ -1,6 +1,6 @@
 # Change Log
 
-* 0.2.x (unreleased)
+* 0.2.9 -- 2026-04-01
   - Add `hot-reload:before-morph` event (cancelable) dispatched before DOM morphing
   - Add `hot-reload:after-morph` event dispatched after DOM morphing
   - Apps can use `before-morph` to replace Idiomorph with a custom morph (e.g. Alpine.morph)
