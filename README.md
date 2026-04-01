@@ -378,6 +378,6 @@ document.addEventListener('hot-reload:after-morph', () => {
 
 ## License
 
-Copyright © 2025 Brett Adams
+Copyright © 2026 Brett Adams
 
 Distributed under the MIT License. See [LICENSE](LICENSE) for details.
