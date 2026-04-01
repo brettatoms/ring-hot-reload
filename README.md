@@ -23,7 +23,7 @@ preserving scroll position, focus, and form state.
 Add to your `deps.edn`:
 
 ```clojure
-{:deps {com.github.brettatoms/ring-hot-reload {:mvn/version "RELEASE"}}}
+{:deps {com.github.brettatoms/ring-hot-reload {:mvn/version "0.2.9"}}}
 ```
 
 > **Note:** This library requires Ring 1.12+ for WebSocket support (`ring.websocket`).
