@@ -52,10 +52,18 @@ function reload() {
           dismissOverlay();
           var cleaned = html.replace(/<!DOCTYPE[^>]*>/i, '').trim();
           cleaned = preserveStylesheetHrefs(cleaned);
-          Idiomorph.morph(document.documentElement, cleaned, {
-            head: {style: 'merge'},
-            morphStyle: 'outerHTML'
+          var beforeEvent = new CustomEvent('hot-reload:before-morph', {
+            cancelable: true,
+            detail: { html: cleaned }
           });
+          var handled = !document.dispatchEvent(beforeEvent);
+          if (!handled) {
+            Idiomorph.morph(document.documentElement, cleaned, {
+              head: {style: 'merge'},
+              morphStyle: 'outerHTML'
+            });
+          }
+          document.dispatchEvent(new CustomEvent('hot-reload:after-morph'));
           if ('{{bust-css-cache}}' === 'true') bustStylesheetCache();
         }
       });

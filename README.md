@@ -302,6 +302,70 @@ not conflict with other WebSocket endpoints in your application. If your app has
 own WebSocket routes, they work independently — Ring's WebSocket model is per-request,
 so each path can return its own `::ws/listener` response.
 
+## Events
+
+The client script dispatches two events on `document` around each DOM morph:
+
+### `hot-reload:before-morph`
+
+Dispatched before the DOM is morphed. The event is **cancelable** — if a
+listener calls `preventDefault()`, ring-hot-reload skips its built-in
+Idiomorph call, allowing the app to handle the morph itself.
+
+| `event.detail` | Description |
+|---|---|
+| `html` | The fetched HTML string (after DOCTYPE removal and stylesheet preservation) |
+
+```javascript
+document.addEventListener('hot-reload:before-morph', (e) => {
+  // e.detail.html contains the new HTML
+  myCustomMorph(document.body, e.detail.html);
+  e.preventDefault(); // skip the default Idiomorph morph
+});
+```
+
+### `hot-reload:after-morph`
+
+Dispatched after the morph completes (whether handled by Idiomorph or a
+custom handler).
+
+```javascript
+document.addEventListener('hot-reload:after-morph', () => {
+  // Re-initialize your framework here
+});
+```
+
+### Alpine.js Integration
+
+Alpine.js attaches reactive state to DOM elements. The default Idiomorph
+morph is Alpine-unaware — it patches the DOM but leaves Alpine's internal
+state stale, causing reactive effects (e.g. `x-show`, `x-bind`) to break.
+
+The recommended fix is to use Alpine's own [morph plugin](https://alpinejs.dev/plugins/morph)
+via the `before-morph` event. Alpine.morph understands Alpine's reactive
+system and preserves state across DOM updates:
+
+```javascript
+import morph from '@alpinejs/morph';
+Alpine.plugin(morph);
+
+document.addEventListener('hot-reload:before-morph', (e) => {
+  const doc = new DOMParser().parseFromString(e.detail.html, 'text/html');
+  Alpine.morph(document.body, doc.body);
+  e.preventDefault();
+});
+```
+
+If you don't need to preserve Alpine state, you can use the simpler
+`after-morph` approach to destroy and re-initialize Alpine after each morph:
+
+```javascript
+document.addEventListener('hot-reload:after-morph', () => {
+  Alpine.destroyTree(document.body);
+  Alpine.initTree(document.body);
+});
+```
+
 ## Known Limitations
 
 - **macOS file watch:** Beholder uses [directory-watcher](https://github.com/gmethvin/directory-watcher)
